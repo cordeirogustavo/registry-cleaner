@@ -31,7 +31,7 @@ echo "$CRON_SCHEDULE /usr/local/bin/prune-registry" >"$crontab_file"
 echo "registry-cleaner ready: schedule='$CRON_SCHEDULE' tz='${TZ:-UTC}' keep=$KEEP dry_run=$DRY_RUN"
 
 if [[ $RUN_ON_START == 1 ]]; then
-  /usr/local/bin/prune-registry
+  /usr/local/bin/prune-registry || echo "error: cleanup on start failed, the schedule keeps running" >&2
 fi
 
 exec supercronic -passthrough-logs "$crontab_file"

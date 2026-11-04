@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+shopt -s inherit_errexit
 
 : "${REGISTRY_URL:?REGISTRY_URL is required}"
 : "${REGISTRY_USERNAME:?REGISTRY_USERNAME is required}"
@@ -8,6 +9,7 @@ set -euo pipefail
 : "${KEEP:?KEEP is required}"
 DRY_RUN="${DRY_RUN:-0}"
 
+registry_config=/etc/docker/registry/config.yml
 api="${REGISTRY_URL%/}/v2"
 accept="application/vnd.docker.distribution.manifest.v2+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.oci.image.index.v1+json"
 
@@ -19,31 +21,42 @@ registry() {
   curl -fsSL -u "$REGISTRY_USERNAME:$REGISTRY_PASSWORD" -H "Accept: $accept" "$@"
 }
 
+registry_exec() {
+  docker exec "$registry_container" sh -c "$1"
+}
+
+list_repositories() {
+  local next="/v2/_catalog?n=1000" headers
+  headers=$(mktemp)
+  while [[ -n $next ]]; do
+    registry -D "$headers" "${REGISTRY_URL%/}$next" | jq -r '.repositories[]?'
+    next=$(tr -d '\r' <"$headers" | sed -n 's/^[Ll]ink: <\([^>]*\)>; rel="next"$/\1/p')
+  done
+  rm -f "$headers"
+}
+
 manifest_digest() {
   registry -I "$api/$1/manifests/$2" | tr -d '\r' | awk 'tolower($1) == "docker-content-digest:" { print $2 }'
 }
 
-image_created_at() {
-  local repo=$1 manifest config_digest
-  manifest=$(registry "$api/$repo/manifests/$2")
-  config_digest=$(jq -r '.config.digest // empty' <<<"$manifest")
-  if [[ -z $config_digest ]]; then
-    manifest=$(registry "$api/$repo/manifests/$(jq -r '[.manifests[] | select(.platform.os != "unknown")][0].digest' <<<"$manifest")")
-    config_digest=$(jq -r '.config.digest' <<<"$manifest")
-  fi
-  registry "$api/$repo/blobs/$config_digest" | jq -r '.created'
+# Image "created" dates are unreliable (BuildKit cache and reproducible builds reuse them), so images are ordered by when the registry received each manifest.
+manifest_push_times() {
+  registry_exec "cd '$storage_root/docker/registry/v2/repositories/$1/_manifests/revisions/sha256' && stat -c '%Y sha256:%n' *"
 }
 
 stale_digests() {
-  local repo=$1 images_in_use=$2 rows="" tag digest in_use
-  for tag in $(registry "$api/$repo/tags/list" | jq -r '.tags[]?'); do
+  local repo=$1 push_times tags tag digest pushed_at in_use rows=""
+  push_times=$(manifest_push_times "$repo")
+  tags=$(registry "$api/$repo/tags/list" | jq -r '.tags[]?')
+  for tag in $tags; do
     digest=$(manifest_digest "$repo" "$tag")
+    pushed_at=$(awk -v digest="$digest" '$2 == digest { print $1 }' <<<"$push_times")
     in_use=0
     grep -q "/$repo:$tag\$" <<<"$images_in_use" && in_use=1
-    rows+="$(image_created_at "$repo" "$digest") $digest $in_use"$'\n'
+    rows+="${pushed_at:-0} $digest $in_use"$'\n'
   done
 
-  printf '%s' "$rows" | sort -r | awk -v keep="$KEEP" '
+  printf '%s' "$rows" | sort -rn | awk -v keep="$KEEP" '
     !($2 in seen) { seen[$2] = 1; order[++n] = $2 }
     $3 == 1 { in_use[$2] = 1 }
     END { for (i = keep + 1; i <= n; i++) if (!in_use[order[i]]) print order[i] }
@@ -51,14 +64,8 @@ stale_digests() {
 }
 
 collect_garbage() {
-  local registry_container output
-  registry_container=$(docker ps -q -f "name=$REGISTRY_SERVICE")
-  if [[ -z $registry_container ]]; then
-    log "error: no $REGISTRY_SERVICE container on this node, garbage collector not run"
-    return 1
-  fi
-
-  output=$(docker exec "$registry_container" registry garbage-collect --delete-untagged /etc/docker/registry/config.yml)
+  local output
+  output=$(registry_exec "registry garbage-collect --delete-untagged $registry_config")
   log "garbage collector removed $(grep -ciE 'deleting (blob|manifest)' <<<"$output" || true) blobs/manifests"
 
   # The registry caches blob descriptors in memory; without a restart it can report a collected layer as present and break the next push.
@@ -66,25 +73,42 @@ collect_garbage() {
   log "$REGISTRY_SERVICE restarted"
 }
 
+trap 'log "error: cleanup failed at line $LINENO, nothing else was deleted"' ERR
+
 log "start: keep=$KEEP dry_run=$DRY_RUN registry=$REGISTRY_URL"
 
+registry_container=$(docker ps -q -f "name=$REGISTRY_SERVICE")
+if [[ -z $registry_container ]]; then
+  log "error: no $REGISTRY_SERVICE container on this node"
+  exit 1
+fi
+storage_root=$(registry_exec "sed -n 's/^ *rootdirectory: *//p' $registry_config")
 images_in_use=$(docker service ls --format '{{.Image}}' | sed 's/@.*//')
-deleted=0
+repositories=$(list_repositories)
+count=0
 
-for repo in $(registry "$api/_catalog?n=10000" | jq -r '.repositories[]?'); do
-  for digest in $(stale_digests "$repo" "$images_in_use"); do
+for repo in $repositories; do
+  digests=$(stale_digests "$repo")
+  for digest in $digests; do
+    count=$((count + 1))
+    if [[ $DRY_RUN == 1 ]]; then
+      log "would delete $repo@$digest"
+      continue
+    fi
     log "delete $repo@$digest"
-    deleted=$((deleted + 1))
-    [[ $DRY_RUN == 1 ]] || registry -X DELETE -o /dev/null "$api/$repo/manifests/$digest"
+    registry -X DELETE -o /dev/null "$api/$repo/manifests/$digest"
   done
 done
 
-log "images deleted: $deleted"
+if [[ $DRY_RUN == 1 ]]; then
+  log "done (dry run): $count images would be deleted"
+  exit 0
+fi
 
-if [[ $DRY_RUN == 1 || $deleted == 0 ]]; then
-  log "done, garbage collector skipped"
+if [[ $count == 0 ]]; then
+  log "done: nothing to delete"
   exit 0
 fi
 
 collect_garbage
-log "done"
+log "done: $count images deleted"
