@@ -18,6 +18,9 @@ removes local images on the leader node, not what is stored in the registry.
 3. Runs the registry garbage collector, so the disk space is actually freed.
 4. Restarts the registry service, clearing its in-memory layer cache so the
    next push does not reference a collected layer.
+5. Optionally prunes the Docker **build cache** of the leader node, where
+   CapRover builds images from source. It grows with every build and is not
+   touched by CapRover's Disk Cleanup.
 
 All configuration comes from environment variables; the output of every run
 shows up in the app logs.
@@ -45,6 +48,7 @@ See [`.env.example`](.env.example).
 | `KEEP` | yes | Images to keep per repository. | `3` |
 | `CRON_SCHEDULE` | yes | When to run, in [cron syntax](https://crontab.guru). | `0 3 * * 6` (Saturdays, 03:00) |
 | `TZ` | no | Timezone for `CRON_SCHEDULE` and log timestamps. Defaults to `UTC`. | `America/Sao_Paulo` |
+| `BUILD_CACHE_MAX_AGE` | no | Also prune build cache entries older than this ([Go duration](https://pkg.go.dev/time#ParseDuration)). Unset disables build cache pruning. | `168h` (7 days) |
 | `DRY_RUN` | no | `1` lists what would be deleted without deleting anything. Defaults to `0`. | `1` |
 | `RUN_ON_START` | no | `1` also runs a cleanup as soon as the container starts. Defaults to `0`. | `1` |
 

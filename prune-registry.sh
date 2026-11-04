@@ -8,6 +8,7 @@ shopt -s inherit_errexit
 : "${REGISTRY_SERVICE:?REGISTRY_SERVICE is required}"
 : "${KEEP:?KEEP is required}"
 DRY_RUN="${DRY_RUN:-0}"
+BUILD_CACHE_MAX_AGE="${BUILD_CACHE_MAX_AGE:-}"
 
 registry_config=/etc/docker/registry/config.yml
 api="${REGISTRY_URL%/}/v2"
@@ -73,6 +74,43 @@ collect_garbage() {
   log "$REGISTRY_SERVICE restarted"
 }
 
+prune_registry_images() {
+  local repositories repo digests digest count=0
+  repositories=$(list_repositories)
+
+  for repo in $repositories; do
+    digests=$(stale_digests "$repo")
+    for digest in $digests; do
+      count=$((count + 1))
+      if [[ $DRY_RUN == 1 ]]; then
+        log "would delete $repo@$digest"
+        continue
+      fi
+      log "delete $repo@$digest"
+      registry -X DELETE -o /dev/null "$api/$repo/manifests/$digest"
+    done
+  done
+
+  if [[ $DRY_RUN == 1 ]]; then
+    log "registry (dry run): $count images would be deleted"
+    return
+  fi
+
+  log "registry: $count images deleted"
+  if [[ $count -gt 0 ]]; then
+    collect_garbage
+  fi
+}
+
+prune_build_cache() {
+  if [[ $DRY_RUN == 1 ]]; then
+    log "build cache (dry run): entries older than $BUILD_CACHE_MAX_AGE would be pruned, current total $(docker builder du | awk '/^Total:/ { print $2 }')"
+    return
+  fi
+
+  log "build cache: $(docker builder prune -af --filter "until=$BUILD_CACHE_MAX_AGE" | awk '/^Total:/ { print $2 }') older than $BUILD_CACHE_MAX_AGE pruned"
+}
+
 trap 'log "error: cleanup failed at line $LINENO, nothing else was deleted"' ERR
 
 log "start: keep=$KEEP dry_run=$DRY_RUN registry=$REGISTRY_URL"
@@ -84,31 +122,10 @@ if [[ -z $registry_container ]]; then
 fi
 storage_root=$(registry_exec "sed -n 's/^ *rootdirectory: *//p' $registry_config")
 images_in_use=$(docker service ls --format '{{.Image}}' | sed 's/@.*//')
-repositories=$(list_repositories)
-count=0
+prune_registry_images
 
-for repo in $repositories; do
-  digests=$(stale_digests "$repo")
-  for digest in $digests; do
-    count=$((count + 1))
-    if [[ $DRY_RUN == 1 ]]; then
-      log "would delete $repo@$digest"
-      continue
-    fi
-    log "delete $repo@$digest"
-    registry -X DELETE -o /dev/null "$api/$repo/manifests/$digest"
-  done
-done
-
-if [[ $DRY_RUN == 1 ]]; then
-  log "done (dry run): $count images would be deleted"
-  exit 0
+if [[ -n $BUILD_CACHE_MAX_AGE ]]; then
+  prune_build_cache
 fi
 
-if [[ $count == 0 ]]; then
-  log "done: nothing to delete"
-  exit 0
-fi
-
-collect_garbage
-log "done: $count images deleted"
+log "done"

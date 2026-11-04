@@ -28,7 +28,7 @@ fi
 crontab_file=/etc/registry-cleaner.crontab
 echo "$CRON_SCHEDULE /usr/local/bin/prune-registry" >"$crontab_file"
 
-echo "registry-cleaner ready: schedule='$CRON_SCHEDULE' tz='${TZ:-UTC}' keep=$KEEP dry_run=$DRY_RUN"
+echo "registry-cleaner ready: schedule='$CRON_SCHEDULE' tz='${TZ:-UTC}' keep=$KEEP build_cache_max_age='${BUILD_CACHE_MAX_AGE:-disabled}' dry_run=$DRY_RUN"
 
 if [[ $RUN_ON_START == 1 ]]; then
   /usr/local/bin/prune-registry || echo "error: cleanup on start failed, the schedule keeps running" >&2
