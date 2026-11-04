@@ -64,7 +64,7 @@ See [`.env.example`](.env.example).
      `Leader`).
    - **Do not expose as web-app**: checked.
    - **Save & Update**.
-3. **Deployment → Deploy via ImageName**: `guhcordeiro/registry-cleaner:1`.
+3. **Deployment → Deploy via ImageName**: `guhcordeiro/registry-cleaner:latest`.
 
 The logs should show:
 
@@ -84,7 +84,7 @@ credentials.
 | Run a cleanup now | `RUN_ON_START=1`, **Save & Update**. |
 | Change how many images to keep or when | Edit `KEEP` / `CRON_SCHEDULE`, **Save & Update**. |
 | Pause the cleanup | Set **Instance Count** to `0`. |
-| Upgrade | Deploy the new image tag via **Deploy via ImageName**. |
+| Upgrade | **Deploy via ImageName** again with `guhcordeiro/registry-cleaner:latest` (CapRover pulls the new image). |
 
 Every run logs each deleted image (`delete <repository>@<digest>`), the total,
 and how many blobs the garbage collector removed.
@@ -98,14 +98,15 @@ cp .env.example .env   # fill in REGISTRY_PASSWORD
 docker run -d --name registry-cleaner --restart unless-stopped \
   --env-file .env \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  guhcordeiro/registry-cleaner:1
+  guhcordeiro/registry-cleaner:latest
 ```
 
 ## Publishing
 
 `.github/workflows/publish.yml` builds the image for `linux/amd64` and
-`linux/arm64` and pushes it to Docker Hub on every `v*` tag, as
-`guhcordeiro/registry-cleaner:<version>`, `:<major>` and `:latest`.
+`linux/arm64` and pushes it to Docker Hub on every push to `main`, as
+`guhcordeiro/registry-cleaner:latest` and `guhcordeiro/registry-cleaner:sha-<short-commit>`.
+Pin a `sha-` tag in CapRover to stay on a specific build.
 
 Repository settings:
 
@@ -113,13 +114,6 @@ Repository settings:
 |---|---|---|
 | `DOCKERHUB_USERNAME` | Variable | Docker Hub user or organization (`guhcordeiro`) |
 | `DOCKERHUB_TOKEN` | Secret | Docker Hub access token with write access |
-
-Release a new version:
-
-```bash
-git tag v1.0.0
-git push origin v1.0.0
-```
 
 ## Security
 
